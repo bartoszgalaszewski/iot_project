@@ -1,0 +1,4 @@
+marshmallow<4
+confluent-kafka==2.4.0
+pymilvus==2.4.4
+python-dotenv>=1.0

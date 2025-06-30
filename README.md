@@ -1,2 +1,13 @@
 # iot_project
-Projekty IoT
+Projekt IoT
+
+┌──────────────┐   HTTP   ┌─────────────┐   Kafka   ┌─────────────┐   PyMilvus   ┌────────────┐
+│ OpenWeather  │ ───────▶ │  Node‑RED   │ ───────▶  │  Kafka      │  ─────────▶  │ Milvus DB  │
+└──────────────┘          │  flow       │           │  broker     │              └────────────┘
+                          └─────────────┘           └─────────────┘                  ▲
+                                                                    REST / gRPC      │
+                                                                                    Query
+                                                                                     │
+                                                                                ┌───────────┐
+                                                                                │ Streamlit │
+                                                                                └───────────┘

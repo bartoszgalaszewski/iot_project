@@ -1,0 +1,96 @@
+[
+  {
+    "id": "502e12e0e6e8a1ed",
+    "type": "tab",
+    "label": "Air Quality Polling"
+  },
+  {
+    "id": "inject_aqi",
+    "type": "inject",
+    "z": "502e12e0e6e8a1ed",
+    "name": "⏰ Tick",
+    "repeat": "${POLL_INTERVAL_SEC}",
+    "payloadType": "date",
+    "x": 110,
+    "y": 80,
+    "wires": [["fn_build_urls"]]
+  },
+  {
+    "id": "fn_build_urls",
+    "type": "function",
+    "z": "502e12e0e6e8a1ed",
+    "name": "Buduj URL-e",
+    "func": "// tworzy tablicę URL-i dla wszystkich lokalizacji\nconst locs = JSON.parse(env.get('LOCATIONS'));\nmsg.payload = locs.map(l => ({\n  city: l[0],\n  url: `https://api.openweathermap.org/data/2.5/air_pollution?lat=${l[1]}&lon=${l[2]}&appid=${env.get('OPENWEATHER_API_KEY')}`\n}));\nreturn msg;",
+    "outputs": 1,
+    "x": 310,
+    "y": 80,
+    "wires": [["split_urls"]]
+  },
+  {
+    "id": "split_urls",
+    "type": "split",
+    "z": "502e12e0e6e8a1ed",
+    "name": "Split na URL-e",
+    "arraySplt": 1,
+    "x": 500,
+    "y": 80,
+    "wires": [["prep_req"]]
+  },
+  {
+    "id": "prep_req",
+    "type": "change",
+    "z": "502e12e0e6e8a1ed",
+    "name": "url→msg.url",
+    "rules": [
+      {"t": "set", "p": "url",  "pt": "msg", "to": "payload.url",  "tot": "msg"},
+      {"t": "set", "p": "city", "pt": "msg", "to": "payload.city", "tot": "msg"},
+      {"t": "set", "p": "payload", "pt": "msg", "to": "", "tot": "str"}
+    ],
+    "x": 730,
+    "y": 40,
+    "wires": [["http_aqi"]]
+  },
+  {
+    "id": "http_aqi",
+    "type": "http request",
+    "z": "502e12e0e6e8a1ed",
+    "name": "Pobierz AQI",
+    "method": "GET",
+    "ret": "obj",
+    "url": "${url}",
+    "x": 730,
+    "y": 120,
+    "wires": [["add_meta"]]
+  },
+  {
+    "id": "add_meta",
+    "type": "function",
+    "z": "502e12e0e6e8a1ed",
+    "name": "Dodaj metadane",
+    "func": "msg.payload.city = msg.city;\nmsg.payload.ts   = Date.now();\nreturn msg;",
+    "outputs": 1,
+    "x": 960,
+    "y": 120,
+    "wires": [["kafka_out"]]
+  },
+  {
+    "id": "kafka_broker",
+    "type": "kafkajs-broker",
+    "name": "Broker",
+    "brokers": "${KAFKA_BROKER}",
+    "clientId": "node-red"
+  },
+  {
+    "id": "kafka_out",
+    "type": "kafkajs-producer",
+    "z": "502e12e0e6e8a1ed",
+    "name": "Do Kafka",
+    "broker": "kafka_broker",
+    "topic": "${KAFKA_TOPIC}",
+    "acks": 1,
+    "compressionType": 0,
+    "x": 1140,
+    "y": 120,
+    "wires": []
+  }
+]
