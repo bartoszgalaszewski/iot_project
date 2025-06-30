@@ -16,18 +16,18 @@ COLL_NAME    = os.getenv("VECTOR_COLLECTION", "env_vectors")
 
 # 2️⃣  Funkcja z retry dla Milvusa
 def wait_for_milvus(max_retries=60, delay=5):
-    """Próbuje połączyć się z Milvusem aż do skutku."""
+    """Próbuje połączyć się z Milvus aż do skutku."""
     retry = 0
     while retry < max_retries:
         try:
             connections.connect(host=MILVUS_HOST, port=MILVUS_PORT)
-            logging.info("✔️  Połączono z Milvusem (%s:%s)", MILVUS_HOST, MILVUS_PORT)
+            logging.info("Połączono z Milvusem (%s:%s)", MILVUS_HOST, MILVUS_PORT)
             return True
         except milvus_ex.MilvusException as e:
             retry += 1
             logging.warning("Milvus nieosiągalny (%s). Próba %d/%d – czekam %ds", e, retry, max_retries, delay)
             time.sleep(delay)
-    logging.error("❌  Nie udało się połączyć z Milvusem po %d próbach", max_retries)
+    logging.error("Nie udało się połączyć z Milvusem po %d próbach", max_retries)
     return False
 
 # Konsument Kafka (łączy się nawet, gdy broker jeszcze wstaje)
@@ -55,7 +55,7 @@ if COLL_NAME not in connections.list_collections():
     Collection(name=COLL_NAME, schema=CollectionSchema(fields))
 collection = Collection(COLL_NAME)
 
-# 5 Pętla główna
+# Pętla główna
 while True:
     msg = consumer.poll(1.0)
     if msg is None:
