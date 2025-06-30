@@ -14,14 +14,16 @@ Kompletny przykład, który **pobiera w czasie rzeczywistym dane o zanieczyszcze
 ## ⚡️ Architektura
 
 ```mermaid
-┌──────────────┐   HTTP   ┌─────────────┐   Kafka   ┌─────────────┐   PyMilvus   ┌────────────┐
-│ OpenWeather  │ ───────▶ │  Node-RED   │ ───────▶  │  Kafka      │  ─────────▶  │ Milvus DB  │
-└──────────────┘          │  flow       │           │  broker     │              └────────────┘
-                          └─────────────┘           └─────────────┘                  ▲
-                                                                    REST / gRPC      │
-                                                                                    Query
-                                                                                     │
-                                                                                ┌───────────┐
-                                                                                │ Streamlit │
-                                                                                └───────────┘
+flowchart LR
+    subgraph Pobieranie
+        OW[OpenWeather<br>API Air-Pollution]
+        NR[Node-RED<br>flow]
+    end
+    KB[Kafka<br>broker]
+    MV[Milvus DB]
+    ST[Streamlit<br>dashboard]
 
+    OW -- "HTTP\n(JSON)" --> NR
+    NR -- "Wiadomości\nKafka" --> KB
+    KB -- "PyMilvus\nSDK" --> MV
+    ST -- "REST / gRPC\nzapytania" --> MV
