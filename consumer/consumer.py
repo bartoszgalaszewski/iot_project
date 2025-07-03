@@ -1,84 +1,84 @@
 #!/usr/bin/env python3
-import json, os, time, logging
-from dotenv import load_dotenv
-from confluent_kafka import Consumer, KafkaError
-from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, exceptions as milvus_ex
+import json
+import time
+from datetime import datetime
 
-load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+from kafka import KafkaConsumer
+from pymilvus import (
+    connections,
+    utility,
+    FieldSchema, CollectionSchema, DataType,
+    Collection
+)
 
-# Stałe ze zmiennych środowiskowych
+# --------------- Konfiguracja ----------------
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
 KAFKA_TOPIC  = os.getenv("KAFKA_TOPIC", "air_quality")
-MILVUS_HOST  = os.getenv("MILVUS_HOST", "milvus")
-MILVUS_PORT  = os.getenv("MILVUS_PORT", "19530")
-COLL_NAME    = os.getenv("VECTOR_COLLECTION", "env_vectors")
 
-# 2️⃣  Funkcja z retry dla Milvusa
-def wait_for_milvus(max_retries=60, delay=5):
-    """Próbuje połączyć się z Milvus aż do skutku."""
-    retry = 0
-    while retry < max_retries:
-        try:
-            connections.connect(host=MILVUS_HOST, port=MILVUS_PORT)
-            logging.info("Połączono z Milvusem (%s:%s)", MILVUS_HOST, MILVUS_PORT)
-            return True
-        except milvus_ex.MilvusException as e:
-            retry += 1
-            logging.warning("Milvus nieosiągalny (%s). Próba %d/%d – czekam %ds", e, retry, max_retries, delay)
-            time.sleep(delay)
-    logging.error("Nie udało się połączyć z Milvusem po %d próbach", max_retries)
-    return False
+MILVUS_HOST = os.getenv("MILVUS_HOST", "milvus")
+MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
+COLLECTION_NAME = "env_vectors"
+VECTOR_DIM = 5
 
-# Konsument Kafka (łączy się nawet, gdy broker jeszcze wstaje)
-consumer_conf = {
-    "bootstrap.servers": KAFKA_BROKER,
-    "group.id": "aqi-consumer",
-    "auto.offset.reset": "earliest",
-    "enable.auto.commit": False,
-}
-consumer = Consumer(consumer_conf)
-consumer.subscribe([KAFKA_TOPIC])
-logging.info("▶️  Subskrybuję temat %s", KAFKA_TOPIC)
+# --------------- Inicjalizacja Milvus -------
+connections.connect("default", host=MILVUS_HOST, port=MILVUS_PORT)
 
-# Czekamy na Milvusa, następnie przygotowujemy kolekcję
-if not wait_for_milvus():
-    raise SystemExit(1)
-
-if COLL_NAME not in connections.list_collections():
+if not utility.has_collection(COLLECTION_NAME):
     fields = [
-        FieldSchema(name="id",     dtype=DataType.INT64, is_primary=True, auto_id=True),
-        FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=5),
-        FieldSchema(name="city",   dtype=DataType.VARCHAR, max_length=64),
-        FieldSchema(name="ts",     dtype=DataType.INT64),
+        FieldSchema(name="ts", dtype=DataType.INT64, is_primary=True, description="Unix timestamp (ms)"),
+        FieldSchema(name="location", dtype=DataType.VARCHAR, max_length=64, description="Location identifier"),
+        FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=VECTOR_DIM, description="Vector [PM2.5, PM10, CO2, temp, humid]")
     ]
-    Collection(name=COLL_NAME, schema=CollectionSchema(fields))
-collection = Collection(COLL_NAME)
+    schema = CollectionSchema(fields, description="Environmental conditions vectors")
+    collection = Collection(name=COLLECTION_NAME, schema=schema)
+    # Tworzymy indeks HNSW na wektorze
+    index_params = {
+        "index_type": "HNSW",
+        "metric_type": "L2",
+        "params": {"M": 16, "efConstruction": 200}
+    }
+    collection.create_index(field_name="vector", index_params=index_params)
+else:
+    collection = Collection(name=COLLECTION_NAME)
 
-# Pętla główna
-while True:
-    msg = consumer.poll(1.0)
-    if msg is None:
-        continue
-    if msg.error():
-        if msg.error().code() != KafkaError._PARTITION_EOF:
-            logging.error("Błąd konsumenta Kafka: %s", msg.error())
-        continue
+# Załaduj kolekcję do pamięci operacyjnej
+collection.load()
 
+# --------------- Inicjalizacja konsumenta Kafka -------
+consumer = KafkaConsumer(
+    KAFKA_TOPIC,
+    bootstrap_servers=[KAFKA_BROKER],
+    value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+    auto_offset_reset='earliest',
+    enable_auto_commit=True,
+    group_id="env-vectorizer"
+)
+
+print(f"[*] Listening for messages on topic '{KAFKA_TOPIC}' at {KAFKA_BROKER}...")
+
+for msg in consumer:
+    data = msg.value
     try:
-        payload = json.loads(msg.value())
-        vec = [
-            payload["list"][0]["components"].get("pm2_5", 0.0),
-            payload["list"][0]["components"].get("pm10", 0.0),
-            payload["list"][0]["components"].get("co", 0.0),
-            payload["list"][0]["components"].get("no2", 0.0),
-            payload["list"][0]["components"].get("o3", 0.0),
-        ]
-        city = payload.get("city", "unknown")
-        ts   = int(time.time() * 1000)
+        pm25        = float(data["pm25"])
+        pm10        = float(data["pm10"])
+        co2         = float(data["co2"])
+        temperature = float(data["temperature"])
+        humidity    = float(data["humidity"])
+        location    = data.get("device", "unknown")
+        ts_ms       = int(time.time() * 1000)
 
-        collection.insert([[vec, city, ts]])
-        logging.info("💾  Zapisano wektor dla %s (%s)", city, vec[:2])
-        consumer.commit(msg)
-    except Exception as e:
-        logging.exception("Wyjątek podczas przetwarzania: %s", e)
+        vector = [pm25, pm10, co2, temperature, humidity]
+
+        entities = [
+            [ts_ms],
+            [location],
+            [vector]
+        ]
+
+        result = collection.insert(entities)
+        print(f"[+] Inserted vector for {location} @ {datetime.fromtimestamp(ts_ms/1000)}; Milvus IDs: {result.primary_keys}")
+
+    except KeyError as e:
+        print(f"[!] Brak pola w danych: {e}; otrzymano: {data}")
+    except Exception as ex:
+        print(f"[!] Błąd przy wstrzykiwaniu do Milvusa: {ex}")

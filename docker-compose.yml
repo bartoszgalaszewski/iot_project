@@ -1,63 +1,133 @@
+volumes:
+  zookeeper_data:
+  kafka_data:
+  milvus_data:
+  node_red_data:
+
+
 services:
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.1
+    image: bitnami/zookeeper:3.9
     container_name: zookeeper
     environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
+      - ALLOW_ANONYMOUS_LOGIN=yes
     ports:
       - "2181:2181"
     volumes:
-      - zookeeper_data:/var/lib/zookeeper
+      - zookeeper_data:/bitnami/zookeeper
+    healthcheck:
+      test: ["CMD-SHELL", "echo mntr | nc -w 2 localhost 2181 | grep zk_version"]
+      start_period: 30s
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
   kafka:
-    image: confluentinc/cp-kafka:7.5.1
+    image: bitnami/kafka:3.7
     container_name: kafka
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS: 250
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - KAFKA_BROKER_ID=1
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT
+      - ALLOW_PLAINTEXT_LISTENER=yes
     ports:
       - "9092:9092"
+      - "9093:9093"
     volumes:
-      - kafka_data:/var/lib/kafka/data
+      - kafka_data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 15s
+      retries: 6
+
+  etcd:
+    container_name: milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.18
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/etcd:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: [ "CMD", "etcdctl", "endpoint", "health" ]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio:
+    container_name: milvus-minio
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9001:9001"
+      - "9000:9000"
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 30s
+      timeout: 20s
+      retries: 3
 
   milvus:
-    image: milvusdb/milvus:v2.4.4
-    container_name: milvus
-    ports:
-      - "19530:19530"   # gRPC / PyMilvus
-      - "9091:9091"     # REST / healthz
+    container_name: milvus-standalone
+    image: milvusdb/milvus:v2.6.0-rc1
+    platform: linux/arm64
+    command: [ "milvus", "run", "standalone" ]
+    security_opt:
+      - seccomp:unconfined
     environment:
-      TZ: UTC
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MQ_TYPE: kafka
+      KAFKA_ADDRESS: kafka:9092
+      KAFKA_BROKER_LIST: kafka:9092
     volumes:
-      - milvus_data:/var/lib/milvus
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9091/healthz" ]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      - "etcd"
+      - "minio"
 
   node-red:
-    image: nodered/node-red:3.1.0
+    build: ./node-red
     container_name: node-red
     ports:
       - "1880:1880"
     env_file:
       - .env
-    environment:
-      - TZ=UTC
     volumes:
-      - ./node-red/data:/data
+      - ./node-red/flow.json:/data/flow.json
+      - node_red_data:/data
+    environment:
+      - KAFKA_BROKER=kafka:9092
+      - POLL_INTERVAL_SEC=600
+      - FLOWS=flow.json
+      - NODE_RED_ENABLE_SAFE_MODE=false
+      - OPENWEATHER_KEY=${OPENWEATHER_KEY}
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
 
   consumer:
     build:
@@ -66,27 +136,37 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - KAFKA_SERVERS=kafka:9092
+      - MILVUS_HOST=milvus
+      - TOPIC=air_quality
+      - TZ=Europe/Warsaw
+      - OPENWEATHER_KEY=${OPENWEATHER_KEY}
     depends_on:
-      - kafka
-      - milvus
+      kafka:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
 
   dashboard:
-    image: python:3.10-slim
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
     container_name: dashboard
     working_dir: /app
     volumes:
       - ./dashboard:/app
     command: >-
-      sh -c "pip install --no-cache-dir -r requirements.txt && \
-             streamlit run app.py --server.port 8501 --server.address 0.0.0.0"
+      sh -c "pip install --no-cache-dir -r requirements.txt && 
+             streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true"
     env_file:
       - .env
     ports:
       - "8501:8501"
     depends_on:
-      - milvus
+      milvus:
+        condition: service_healthy
 
-volumes:
-  zookeeper_data:
-  kafka_data:
-  milvus_data:
+networks:
+  default:
+    name: milvus
